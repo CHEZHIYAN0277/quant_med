@@ -1,12 +1,6 @@
 venv/
+.venv/
 __pycache__/
 .DS_Store
 *.pyc
-venv/
-__pycache__/
-.DS_Store
-*.pyc
-venv/
-__pycache__/
-.DS_Store
-*.pyc
+chembl_dpp4_dataset.csv

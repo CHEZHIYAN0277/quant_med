@@ -1,24 +1,17 @@
-from qiskit_aer import Aer
 from qiskit.circuit.library import ZZFeatureMap
-from qiskit.utils import QuantumInstance
-from qiskit_machine_learning.kernels import QuantumKernel
+from qiskit_machine_learning.kernels import FidelityQuantumKernel
 from sklearn.svm import SVC
 
 
 def quantum_refinement(X, y):
 
     feature_map = ZZFeatureMap(
-        feature_dimension=3,
+        feature_dimension=X.shape[1],
         reps=1
     )
 
-    backend = Aer.get_backend("aer_simulator_statevector")
-
-    quantum_instance = QuantumInstance(backend)
-
-    quantum_kernel = QuantumKernel(
-        feature_map=feature_map,
-        quantum_instance=quantum_instance
+    quantum_kernel = FidelityQuantumKernel(
+        feature_map=feature_map
     )
 
     kernel_matrix = quantum_kernel.evaluate(X)

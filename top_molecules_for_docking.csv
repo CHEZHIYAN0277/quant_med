@@ -1,6 +1,0 @@
-SMILES,IC50,Activity
-FC(F)F.N#Cc1ccc(-c2nn(C3CC3)c(N)c2C#N)cc1,150.0,1
-Nc1nc(N2CCC(c3ncc(C(F)(F)F)s3)CC2)ncc1F,85.0,1
-CC(=O)Nc1ccc(N2CCN(c3ncccn3)CC2)cc1,320.0,1
-O=C(O)c1cc(NC(=O)c2ccc(F)cc2)ccc1O,1200.0,0
-CC1CC(N2C(=O)c3[nH]cnc3C2=O)C(O)C1O,500.0,1

@@ -39,7 +39,7 @@ from rdkit.Chem import AllChem, rdmolfiles
 # Configuration
 # ---------------------------------------------------------------------------
 
-INPUT_CSV = "top_molecules_for_docking.csv"
+INPUT_CSV = "chembl_dpp4_dataset.csv"
 OUTPUT_CSV = "docking_results.csv"
 OUTPUT_DIR = "output"                       # intermediate .sdf / .pdbqt files
 PDB_ID = "4A5S"
