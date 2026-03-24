@@ -32,6 +32,29 @@ ELEMENT_COLORS = {
     "H":  "#aaaaaa",
 }
 
+# ── Known DPP-4 inhibitors for reference comparison ─────────────────
+
+REFERENCE_MOLECULES = [
+    {
+        "name": "Sitagliptin",
+        "smiles": "Fc1cc(c(F)cc1F)C[C@@H](N)CC(=O)N1CCn2c(nnc2C(F)(F)F)C1",
+        "ic50": 18.0,
+        "description": "First FDA-approved DPP-4 inhibitor (Januvia)",
+    },
+    {
+        "name": "Vildagliptin",
+        "smiles": "O=C(CN1CCC[C@@H]1C#N)[NH]C1CC2CC(C1)C(O)C2",
+        "ic50": 3.5,
+        "description": "Second-generation DPP-4 inhibitor (Galvus)",
+    },
+    {
+        "name": "Saxagliptin",
+        "smiles": "N#C[C@H]1CC(O)(CC1N)C12CC3CC(CC(O)(C3)C1)C2",
+        "ic50": 1.3,
+        "description": "Potent DPP-4 inhibitor (Onglyza)",
+    },
+]
+
 ELEMENT_RADII = {
     "C": 0.40, "N": 0.38, "O": 0.36, "S": 0.50, "F": 0.32,
     "Cl": 0.48, "Br": 0.54, "P": 0.52, "I": 0.58, "H": 0.20,
@@ -143,17 +166,18 @@ def run_pipeline():
 
 # ── Generate HTML ────────────────────────────────────────────────────────
 
-def generate_html(molecules_data, output_path):
+def generate_html(molecules_data, output_path, reference_data=None):
     """Write the self-contained HTML viewer with embedded molecule data."""
     molecules_json = json.dumps(molecules_data, indent=2)
-    html = _build_html(molecules_json)
+    reference_json = json.dumps(reference_data or [], indent=2)
+    html = _build_html(molecules_json, reference_json)
     with open(output_path, "w") as f:
         f.write(html)
     print(f"\n✓ Visualization saved to: {output_path}")
     print(f"  Open in browser:  open {output_path}")
 
 
-def _build_html(molecules_json):
+def _build_html(molecules_json, reference_json):
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -174,6 +198,15 @@ canvas{{display:block}}
 @keyframes pulse-dot{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.5;transform:scale(0.7)}}}}
 #sidebar{{position:fixed;top:80px;left:20px;z-index:100;width:280px;padding:20px;max-height:calc(100vh - 100px);overflow-y:auto}}
 #sidebar h2{{font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;color:#00e5ff;margin-bottom:16px}}
+.section-divider{{height:1px;background:linear-gradient(90deg,transparent,rgba(255,215,0,0.3),transparent);margin:16px 0}}
+.ref-heading{{font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;color:#ffd700;margin-bottom:12px}}
+.molecule-card.reference{{border:1px solid rgba(255,215,0,0.15)}}
+.molecule-card.reference:hover{{border-color:rgba(255,215,0,0.35);transform:translateX(4px)}}
+.molecule-card.reference.active{{border-color:rgba(255,215,0,0.5);box-shadow:0 0 20px rgba(255,215,0,0.12)}}
+.molecule-card.reference::before{{background:linear-gradient(135deg,rgba(255,215,0,0.06),transparent)}}
+.molecule-card.reference .molecule-rank{{color:#ffd700}}
+.ref-badge{{display:inline-block;font-size:8px;letter-spacing:1px;text-transform:uppercase;color:#ffd700;background:rgba(255,215,0,0.1);padding:2px 6px;border-radius:4px;margin-left:6px}}
+.info-value.ref-highlight{{color:#ffd700;font-size:20px;font-weight:600}}
 .molecule-card{{padding:14px;border-radius:12px;margin-bottom:8px;cursor:pointer;transition:all 0.3s ease;border:1px solid transparent;position:relative;overflow:hidden}}
 .molecule-card::before{{content:'';position:absolute;top:0;left:0;width:100%;height:100%;background:linear-gradient(135deg,rgba(0,229,255,0.05),transparent);opacity:0;transition:opacity 0.3s}}
 .molecule-card:hover::before,.molecule-card.active::before{{opacity:1}}
@@ -221,15 +254,17 @@ canvas{{display:block}}
 <body>
 <div id="loading"><div class="loading-ring"></div><div class="loading-text">Initializing Quantum Viewer</div></div>
 <div id="title-bar" class="glass"><div class="quantum-dot"></div><h1>Quantum Molecular Viewer</h1><div class="quantum-dot"></div></div>
-<div id="sidebar" class="glass"><h2>Top Candidates</h2><div id="molecule-list"></div></div>
+<div id="sidebar" class="glass"><h2>Top Candidates</h2><div id="molecule-list"></div><div class="section-divider"></div><div class="ref-heading">Reference Drugs &#x1f3af;</div><div id="reference-list"></div></div>
 <div id="info-panel" class="glass">
     <h3>Molecule Details</h3>
     <div class="info-grid">
         <div class="info-item"><span class="info-label">Quantum Score</span><span class="info-value highlight" id="info-qscore">&mdash;</span></div>
+        <div class="info-item"><span class="info-label">Type</span><span class="info-value" id="info-type">&mdash;</span></div>
         <div class="info-item"><span class="info-label">Activity</span><span class="info-value" id="info-activity">&mdash;</span></div>
         <div class="info-item"><span class="info-label">IC50 (nM)</span><span class="info-value" id="info-ic50">&mdash;</span></div>
         <div class="info-item"><span class="info-label">Atoms</span><span class="info-value" id="info-atoms">&mdash;</span></div>
         <div class="info-item full"><span class="info-label">SMILES</span><span class="info-value info-smiles" id="info-smiles">&mdash;</span></div>
+        <div class="info-item full" id="info-desc-row" style="display:none"><span class="info-label">Description</span><span class="info-value" id="info-desc" style="font-size:11px;color:#ffd700">&mdash;</span></div>
     </div>
 </div>
 <div id="controls" class="glass">
@@ -244,7 +279,8 @@ canvas{{display:block}}
 <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/examples/js/controls/OrbitControls.js"></script>
 <script>
 const MOLECULES = {molecules_json};
-let currentMolIndex = -1, autoRotate = true, showLabels = false, showParticles = true;
+const REFERENCES = {reference_json};
+let currentMolIndex = -1, currentIsRef = false, autoRotate = true, showLabels = false, showParticles = true;
 let moleculeGroup = null, labelSprites = [], particleSystem = null;
 
 const container = document.getElementById('canvas-container');
@@ -357,39 +393,68 @@ function populateUI() {{
     MOLECULES.forEach((mol,i)=>{{
         const card=document.createElement('div');
         card.className='molecule-card'+(i===0?' active':'');card.id='mol-card-'+i;
-        card.onclick=()=>selectMolecule(i);
+        card.onclick=()=>selectMolecule(i,false);
         card.innerHTML=`<div class="molecule-rank">#${{i+1}}</div><div class="molecule-name">${{mol.smiles}}</div>
         <div class="molecule-stats"><div class="stat"><div class="stat-label">Q-Score</div><div class="stat-value">${{mol.quantum_score.toFixed(3)}}</div></div>
         <div class="stat"><div class="stat-label">IC50</div><div class="stat-value">${{mol.ic50.toFixed(1)}}</div></div>
         <div class="stat"><div class="stat-label">Active</div><div class="stat-value active-${{mol.activity}}">${{mol.activity?'Yes':'No'}}</div></div></div>`;
         list.appendChild(card);
     }});
+    const refList=document.getElementById('reference-list');refList.innerHTML='';
+    REFERENCES.forEach((ref,i)=>{{
+        const card=document.createElement('div');
+        card.className='molecule-card reference';card.id='ref-card-'+i;
+        card.onclick=()=>selectMolecule(i,true);
+        card.innerHTML=`<div class="molecule-rank">${{ref.name}} <span class="ref-badge">Approved Drug</span></div><div class="molecule-name">${{ref.smiles}}</div>
+        <div class="molecule-stats"><div class="stat"><div class="stat-label">IC50</div><div class="stat-value">${{ref.ic50.toFixed(1)}} nM</div></div>
+        <div class="stat"><div class="stat-label">Active</div><div class="stat-value active-1">Yes</div></div></div>`;
+        refList.appendChild(card);
+    }});
     const legendEl=document.getElementById('legend-items');const elements={{}};
-    MOLECULES.forEach(mol=>{{mol.structure.atoms.forEach(a=>{{if(a.element!=='H')elements[a.element]=a.color}})}});
+    MOLECULES.concat(REFERENCES).forEach(mol=>{{mol.structure.atoms.forEach(a=>{{if(a.element!=='H')elements[a.element]=a.color}})}});
     legendEl.innerHTML=Object.entries(elements).map(([el,color])=>
         `<div class="legend-item"><div class="legend-dot" style="background:${{color}};color:${{color}}"></div>${{el}}</div>`).join('');
 }}
 
-function updateInfoPanel(mol) {{
-    document.getElementById('info-qscore').textContent=mol.quantum_score.toFixed(4);
-    document.getElementById('info-activity').textContent=mol.activity?'Active':'Inactive';
-    document.getElementById('info-activity').style.color=mol.activity?'#4dff9e':'#ff6b6b';
+function updateInfoPanel(mol, isRef) {{
+    const qEl=document.getElementById('info-qscore');
+    const typeEl=document.getElementById('info-type');
+    const descRow=document.getElementById('info-desc-row');
+    const descEl=document.getElementById('info-desc');
+    if(isRef){{
+        qEl.textContent='N/A';
+        qEl.className='info-value ref-highlight';
+        typeEl.textContent='Reference Drug';
+        typeEl.style.color='#ffd700';
+        descRow.style.display='';
+        descEl.textContent=mol.description||'';
+    }}else{{
+        qEl.textContent=mol.quantum_score.toFixed(4);
+        qEl.className='info-value highlight';
+        typeEl.textContent='Pipeline Candidate';
+        typeEl.style.color='#00e5ff';
+        descRow.style.display='none';
+    }}
+    document.getElementById('info-activity').textContent='Active';
+    document.getElementById('info-activity').style.color='#4dff9e';
     document.getElementById('info-ic50').textContent=mol.ic50.toFixed(2);
     document.getElementById('info-atoms').textContent=mol.structure.atoms.filter(a=>a.element!=='H').length;
     document.getElementById('info-smiles').textContent=mol.smiles;
 }}
 
-function selectMolecule(index) {{
-    if(index===currentMolIndex) return;
-    document.querySelectorAll('.molecule-card').forEach((c,i)=>c.classList.toggle('active',i===index));
+function selectMolecule(index, isRef) {{
+    if(index===currentMolIndex && isRef===currentIsRef) return;
+    document.querySelectorAll('.molecule-card').forEach(c=>c.classList.remove('active'));
+    const cardId=isRef?'ref-card-'+index:'mol-card-'+index;
+    const card=document.getElementById(cardId);if(card)card.classList.add('active');
     if(moleculeGroup) scene.remove(moleculeGroup);
     if(particleSystem) scene.remove(particleSystem);
-    currentMolIndex=index;
-    const mol=MOLECULES[index];
+    currentMolIndex=index;currentIsRef=isRef;
+    const mol=isRef?REFERENCES[index]:MOLECULES[index];
     const {{group,sprites,cloudRadius}}=buildMolecule(mol.structure);
     scene.add(group);moleculeGroup=group;labelSprites=sprites;
     particleSystem=createQuantumCloud(cloudRadius);particleSystem.visible=showParticles;scene.add(particleSystem);
-    updateInfoPanel(mol);
+    updateInfoPanel(mol,isRef);
     camera.position.setLength(Math.max(cloudRadius*3,12));
 }}
 
@@ -426,7 +491,7 @@ window.addEventListener('resize',()=>{{
     renderer.setSize(window.innerWidth,window.innerHeight);
 }});
 
-populateUI();selectMolecule(0);animate();
+populateUI();selectMolecule(0,false);animate();
 setTimeout(()=>{{document.getElementById('loading').classList.add('hide')}},800);
 </script>
 </body>
@@ -443,7 +508,7 @@ if __name__ == "__main__":
 
     top_molecules = run_pipeline()
 
-    print("\nGenerating 3D structures...")
+    print("\nGenerating 3D structures for pipeline candidates...")
     molecules_data = []
     for i, mol in enumerate(top_molecules):
         print(f"  [{i+1}/{len(top_molecules)}] {mol['smiles'][:50]}...")
@@ -461,10 +526,28 @@ if __name__ == "__main__":
         print("ERROR: No valid 3D structures generated.")
         exit(1)
 
-    print(f"\n✓ Generated 3D data for {len(molecules_data)} molecules")
+    print(f"\n✓ Generated 3D data for {len(molecules_data)} pipeline candidates")
+
+    # Generate 3D structures for reference (known) DPP-4 inhibitors
+    print("\nGenerating 3D structures for reference drugs...")
+    reference_data = []
+    for i, ref in enumerate(REFERENCE_MOLECULES):
+        print(f"  [{i+1}/{len(REFERENCE_MOLECULES)}] {ref['name']}...")
+        structure = mol_to_3d_data(ref["smiles"])
+        if structure:
+            reference_data.append({
+                "name": ref["name"],
+                "smiles": ref["smiles"],
+                "ic50": ref["ic50"],
+                "activity": 1,
+                "description": ref["description"],
+                "structure": structure,
+            })
+
+    print(f"✓ Generated 3D data for {len(reference_data)} reference drugs")
 
     output_path = os.path.join(os.path.dirname(__file__), "molecule_viewer.html")
-    generate_html(molecules_data, output_path)
+    generate_html(molecules_data, output_path, reference_data=reference_data)
 
     print()
     print("=" * 60)
