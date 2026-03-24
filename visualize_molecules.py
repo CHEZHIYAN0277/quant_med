@@ -14,7 +14,7 @@ import os
 import numpy as np
 
 from rdkit import Chem
-from rdkit.Chem import AllChem
+from rdkit.Chem import AllChem, rdFMCS
 from sklearn.decomposition import PCA
 from sklearn.preprocessing import StandardScaler
 
@@ -110,6 +110,95 @@ def mol_to_3d_data(smiles):
     return {"atoms": atoms, "bonds": bonds}
 
 
+# ── MCS-based comparison data ────────────────────────────────────────────
+
+def compute_comparison_data(molecules_data, reference_data):
+    """Compute MCS-based structural comparisons between candidates and references.
+    Returns a dict mapping 'cand_idx-ref_idx' to highlight data."""
+    comparisons = {}
+
+    for ci, cand in enumerate(molecules_data):
+        cand_mol = Chem.MolFromSmiles(cand["smiles"])
+        if cand_mol is None:
+            continue
+
+        for ri, ref in enumerate(reference_data):
+            ref_mol = Chem.MolFromSmiles(ref["smiles"])
+            if ref_mol is None:
+                continue
+
+            try:
+                mcs_result = rdFMCS.FindMCS(
+                    [cand_mol, ref_mol],
+                    atomCompare=rdFMCS.AtomCompare.CompareElements,
+                    bondCompare=rdFMCS.BondCompare.CompareOrder,
+                    timeout=5,
+                )
+                mcs_smarts = mcs_result.smartsString
+                if not mcs_smarts:
+                    raise ValueError("Empty MCS")
+
+                mcs_mol = Chem.MolFromSmarts(mcs_smarts)
+                if mcs_mol is None:
+                    raise ValueError("Invalid MCS SMARTS")
+
+                # Find atoms in candidate that match MCS
+                cand_match = cand_mol.GetSubstructMatch(mcs_mol)
+                ref_match = ref_mol.GetSubstructMatch(mcs_mol)
+
+                cand_common = set(cand_match) if cand_match else set()
+                ref_common = set(ref_match) if ref_match else set()
+
+                # All heavy atom indices
+                cand_all = {a.GetIdx() for a in cand_mol.GetAtoms() if a.GetSymbol() != 'H'}
+                ref_all = {a.GetIdx() for a in ref_mol.GetAtoms() if a.GetSymbol() != 'H'}
+
+                cand_unique = sorted(cand_all - cand_common)
+                ref_unique = sorted(ref_all - ref_common)
+
+                # Build text summary of differences
+                cand_unique_elements = {}
+                for idx in cand_unique:
+                    el = cand_mol.GetAtomWithIdx(idx).GetSymbol()
+                    cand_unique_elements[el] = cand_unique_elements.get(el, 0) + 1
+
+                ref_unique_elements = {}
+                for idx in ref_unique:
+                    el = ref_mol.GetAtomWithIdx(idx).GetSymbol()
+                    ref_unique_elements[el] = ref_unique_elements.get(el, 0) + 1
+
+                adds = ", ".join(f"+{count} {el}" for el, count in sorted(cand_unique_elements.items()))
+                removes = ", ".join(f"-{count} {el}" for el, count in sorted(ref_unique_elements.items()))
+                summary_parts = []
+                if adds:
+                    summary_parts.append(f"Candidate adds: {adds}")
+                if removes:
+                    summary_parts.append(f"Reference has: {removes}")
+                summary = " | ".join(summary_parts) if summary_parts else "Identical scaffolds"
+
+                comparisons[f"{ci}-{ri}"] = {
+                    "cand_unique": cand_unique,
+                    "ref_unique": ref_unique,
+                    "common_count": len(cand_common),
+                    "cand_unique_count": len(cand_unique),
+                    "ref_unique_count": len(ref_unique),
+                    "mcs_atoms": mcs_result.numAtoms,
+                    "summary": summary,
+                }
+            except Exception:
+                comparisons[f"{ci}-{ri}"] = {
+                    "cand_unique": [],
+                    "ref_unique": [],
+                    "common_count": 0,
+                    "cand_unique_count": 0,
+                    "ref_unique_count": 0,
+                    "mcs_atoms": 0,
+                    "summary": "Could not compute MCS",
+                }
+
+    return comparisons
+
+
 # ── Run pipeline ─────────────────────────────────────────────────────────
 
 def run_pipeline():
@@ -166,18 +255,19 @@ def run_pipeline():
 
 # ── Generate HTML ────────────────────────────────────────────────────────
 
-def generate_html(molecules_data, output_path, reference_data=None):
+def generate_html(molecules_data, output_path, reference_data=None, comparisons=None):
     """Write the self-contained HTML viewer with embedded molecule data."""
     molecules_json = json.dumps(molecules_data, indent=2)
     reference_json = json.dumps(reference_data or [], indent=2)
-    html = _build_html(molecules_json, reference_json)
+    comparisons_json = json.dumps(comparisons or {}, indent=2)
+    html = _build_html(molecules_json, reference_json, comparisons_json)
     with open(output_path, "w") as f:
         f.write(html)
     print(f"\n✓ Visualization saved to: {output_path}")
     print(f"  Open in browser:  open {output_path}")
 
 
-def _build_html(molecules_json, reference_json):
+def _build_html(molecules_json, reference_json, comparisons_json):
     return f'''<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -196,7 +286,8 @@ canvas{{display:block}}
 #title-bar h1{{font-size:18px;font-weight:600;letter-spacing:1.5px;text-transform:uppercase;background:linear-gradient(135deg,#00e5ff,#7c4dff,#ff3d5a);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text}}
 .quantum-dot{{width:8px;height:8px;border-radius:50%;background:#00e5ff;box-shadow:0 0 12px #00e5ff,0 0 30px rgba(0,229,255,0.3);animation:pulse-dot 2s ease-in-out infinite}}
 @keyframes pulse-dot{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.5;transform:scale(0.7)}}}}
-#sidebar{{position:fixed;top:80px;left:20px;z-index:100;width:280px;padding:20px;max-height:calc(100vh - 100px);overflow-y:auto}}
+#sidebar{{position:fixed;top:80px;left:20px;z-index:100;width:280px;padding:20px;max-height:calc(100vh - 100px);overflow-y:auto;transition:transform 0.3s ease,opacity 0.3s ease}}
+#sidebar.collapsed{{transform:translateX(-310px);opacity:0;pointer-events:none}}
 #sidebar h2{{font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;color:#00e5ff;margin-bottom:16px}}
 .section-divider{{height:1px;background:linear-gradient(90deg,transparent,rgba(255,215,0,0.3),transparent);margin:16px 0}}
 .ref-heading{{font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;color:#ffd700;margin-bottom:12px}}
@@ -249,12 +340,49 @@ canvas{{display:block}}
 .loading-ring{{width:60px;height:60px;border:2px solid rgba(0,229,255,0.1);border-top-color:#00e5ff;border-radius:50%;animation:spin 1s linear infinite}}
 @keyframes spin{{to{{transform:rotate(360deg)}}}}
 .loading-text{{font-size:12px;letter-spacing:3px;text-transform:uppercase;color:#6b7394}}
+#compare-panel{{position:fixed;top:80px;right:20px;z-index:100;width:340px;padding:20px;display:none;transition:transform 0.3s ease,opacity 0.3s ease}}
+#compare-panel.collapsed{{transform:translateX(370px);opacity:0;pointer-events:none}}
+.panel-toggle{{position:fixed;z-index:200;width:36px;height:36px;border:1px solid rgba(0,229,255,0.25);border-radius:10px;background:rgba(12,18,35,0.8);backdrop-filter:blur(10px);color:#00e5ff;font-size:16px;cursor:pointer;display:flex;align-items:center;justify-content:center;transition:all 0.3s ease}}
+.panel-toggle:hover{{background:rgba(0,229,255,0.15);border-color:rgba(0,229,255,0.5)}}
+#sidebar-toggle{{top:80px;left:20px;display:none}}
+#compare-toggle-btn{{top:80px;right:20px;display:none}}
+#compare-panel h3{{font-size:12px;font-weight:500;letter-spacing:2px;text-transform:uppercase;background:linear-gradient(90deg,#4dff9e,#ffa94d);-webkit-background-clip:text;-webkit-text-fill-color:transparent;background-clip:text;margin-bottom:14px}}
+.compare-row{{display:flex;justify-content:space-between;align-items:center;padding:8px 0;border-bottom:1px solid rgba(255,255,255,0.05)}}
+.compare-row:last-child{{border-bottom:none}}
+.compare-label{{font-size:10px;text-transform:uppercase;letter-spacing:1.5px;color:#6b7394}}
+.compare-value{{font-family:'JetBrains Mono',monospace;font-size:13px}}
+.compare-summary{{font-size:11px;color:#c8cce0;line-height:1.6;padding:10px;background:rgba(255,255,255,0.03);border-radius:8px;margin-top:10px}}
+.highlight-legend{{display:flex;gap:16px;margin-top:12px;padding-top:12px;border-top:1px solid rgba(255,255,255,0.05)}}
+.hl-item{{display:flex;align-items:center;gap:6px;font-size:10px;color:#8b90a8}}
+.hl-dot{{width:10px;height:10px;border-radius:50%}}
+.hl-dot.unique-cand{{background:linear-gradient(135deg,#00e5ff,#ff69b4,#4dff9e);box-shadow:0 0 8px #00e5ff}}
+.hl-dot.unique-ref{{background:#ffa94d;box-shadow:0 0 8px #ffa94d}}
+.hl-dot.common{{background:#556677;box-shadow:none;opacity:0.5}}
+.ref-selector{{width:100%;background:rgba(255,255,255,0.06);border:1px solid rgba(255,215,0,0.2);border-radius:8px;color:#e0e4f0;font-family:'Outfit',sans-serif;font-size:12px;padding:8px 12px;margin-bottom:14px;outline:none;cursor:pointer;appearance:none;-webkit-appearance:none}}
+.ref-selector:focus{{border-color:rgba(255,215,0,0.5)}}
+.ref-selector option{{background:#0c1223;color:#e0e4f0}}
+.side-label{{position:absolute;top:-22px;font-size:10px;letter-spacing:2px;text-transform:uppercase;font-family:'JetBrains Mono',monospace}}
+.side-label.left{{left:0;color:#ffa94d}}
+.side-label.right{{right:0;color:#4dff9e}}
+@keyframes pulse-unique{{0%,100%{{opacity:1;transform:scale(1)}}50%{{opacity:0.7;transform:scale(1.15)}}}}
 </style>
 </head>
 <body>
 <div id="loading"><div class="loading-ring"></div><div class="loading-text">Initializing Quantum Viewer</div></div>
 <div id="title-bar" class="glass"><div class="quantum-dot"></div><h1>Quantum Molecular Viewer</h1><div class="quantum-dot"></div></div>
 <div id="sidebar" class="glass"><h2>Top Candidates</h2><div id="molecule-list"></div><div class="section-divider"></div><div class="ref-heading">Reference Drugs &#x1f3af;</div><div id="reference-list"></div></div>
+<div id="compare-panel" class="glass">
+    <h3>&#9889; Structural Comparison</h3>
+    <select id="ref-selector" class="ref-selector" onchange="onRefSelectorChange()"></select>
+    <div class="compare-row"><span class="compare-label">Common Atoms (MCS)</span><span class="compare-value" id="cmp-common">&mdash;</span></div>
+    <div class="compare-row"><span class="compare-label">Unique to Candidate</span><span class="compare-value" style="color:#00e5ff" id="cmp-cand-unique">&mdash;</span></div>
+    <div class="compare-row"><span class="compare-label">Unique to Reference</span><span class="compare-value" style="color:#ffa94d" id="cmp-ref-unique">&mdash;</span></div>
+    <div class="compare-summary" id="cmp-summary">&mdash;</div>
+    <div class="highlight-legend">
+        <div class="hl-item"><div class="hl-dot unique-cand"></div>Unique (vivid)</div>
+        <div class="hl-item"><div class="hl-dot common"></div>Common (faded)</div>
+    </div>
+</div>
 <div id="info-panel" class="glass">
     <h3>Molecule Details</h3>
     <div class="info-grid">
@@ -271,8 +399,11 @@ canvas{{display:block}}
     <div class="toggle" onclick="toggleAutoRotate()"><div class="toggle-switch on" id="toggle-rotate"></div><span>Auto-Rotate</span></div>
     <div class="toggle" onclick="toggleLabels()"><div class="toggle-switch" id="toggle-labels"></div><span>Labels</span></div>
     <div class="toggle" onclick="toggleParticles()"><div class="toggle-switch on" id="toggle-particles"></div><span>Quantum Field</span></div>
+    <div class="toggle" onclick="toggleCompare()"><div class="toggle-switch" id="toggle-compare"></div><span>Compare &#9889;</span></div>
 </div>
 <div id="element-legend" class="glass"><h4>Elements</h4><div class="legend-items" id="legend-items"></div></div>
+<button id="sidebar-toggle" class="panel-toggle" onclick="toggleSidebar()" title="Toggle Candidates">&#9776;</button>
+<button id="compare-toggle-btn" class="panel-toggle" onclick="toggleComparePanel()" title="Toggle Comparison">&#9881;</button>
 <div id="canvas-container"></div>
 
 <script src="https://cdn.jsdelivr.net/npm/three@0.146.0/build/three.min.js"></script>
@@ -280,8 +411,10 @@ canvas{{display:block}}
 <script>
 const MOLECULES = {molecules_json};
 const REFERENCES = {reference_json};
+const COMPARISONS = {comparisons_json};
 let currentMolIndex = -1, currentIsRef = false, autoRotate = true, showLabels = false, showParticles = true;
-let moleculeGroup = null, labelSprites = [], particleSystem = null;
+let compareMode = false, compareRefIndex = 0;
+let moleculeGroup = null, refMolGroup = null, labelSprites = [], refLabelSprites = [], particleSystem = null;
 
 const container = document.getElementById('canvas-container');
 const scene = new THREE.Scene();
@@ -338,26 +471,37 @@ function createQuantumCloud(radius) {{
     p.userData.vels=vels; p.userData.radius=radius; return p;
 }}
 
-function buildMolecule(data) {{
+function buildMolecule(data, highlightIndices, highlightColor, dimMode) {{
     const group=new THREE.Group(), sprites=[];
     let cx=0,cy=0,cz=0,n=0;
     data.atoms.forEach(a=>{{if(a.element!=='H'){{cx+=a.x;cy+=a.y;cz+=a.z;n++}}}});
     if(n===0) data.atoms.forEach(a=>{{cx+=a.x;cy+=a.y;cz+=a.z;n++}});
     cx/=n;cy/=n;cz/=n;
+    const hlSet=new Set(highlightIndices||[]);
     const positions=[];
+    let heavyIdx=-1;
     data.atoms.forEach((atom,i)=>{{
         const pos=new THREE.Vector3(atom.x-cx,atom.y-cy,atom.z-cz);
         positions.push(pos);
         if(atom.element==='H') return;
-        const color=new THREE.Color(atom.color);
-        const sphere=new THREE.Mesh(new THREE.SphereGeometry(atom.radius,32,32),
-            new THREE.MeshStandardMaterial({{color,emissive:color,emissiveIntensity:0.8,metalness:0.4,roughness:0.2}}));
+        heavyIdx++;
+        const isHighlighted=hlSet.has(heavyIdx);
+        const isDimmed=dimMode&&!isHighlighted;
+        // Unique atoms: vivid element colors. Common atoms: grey transparent.
+        const color=isDimmed?new THREE.Color('#556677'):new THREE.Color(atom.color);
+        const emissiveI=isDimmed?0.1:0.6;
+        const opacity=isDimmed?0.3:1.0;
+        const radius=atom.radius;
+        const sphere=new THREE.Mesh(new THREE.SphereGeometry(radius,32,32),
+            new THREE.MeshStandardMaterial({{color,emissive:color,emissiveIntensity:emissiveI,metalness:0.3,roughness:0.3,transparent:true,opacity}}));
         sphere.position.copy(pos); group.add(sphere);
-        const glow=new THREE.Mesh(new THREE.SphereGeometry(atom.radius*2.5,16,16),
-            new THREE.MeshBasicMaterial({{color,transparent:true,opacity:0.08,blending:THREE.AdditiveBlending,depthWrite:false}}));
+        const glowOpacity=isDimmed?0.0:0.06;
+        const glow=new THREE.Mesh(new THREE.SphereGeometry(atom.radius*2.0,16,16),
+            new THREE.MeshBasicMaterial({{color,transparent:true,opacity:glowOpacity,blending:THREE.AdditiveBlending,depthWrite:false}}));
         glow.position.copy(pos); group.add(glow);
         const canvas=document.createElement('canvas');canvas.width=64;canvas.height=32;
-        const ctx=canvas.getContext('2d');ctx.font='bold 20px Outfit';ctx.fillStyle=atom.color;
+        const ctx=canvas.getContext('2d');ctx.font='bold 20px Outfit';
+        ctx.fillStyle=isDimmed?'#556677':atom.color;
         ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(atom.element,32,16);
         const sprite=new THREE.Sprite(new THREE.SpriteMaterial({{map:new THREE.CanvasTexture(canvas),transparent:true,depthWrite:false,opacity:0}}));
         sprite.position.copy(pos);sprite.position.y+=atom.radius+0.4;sprite.scale.set(1.2,0.6,1);
@@ -370,11 +514,12 @@ function buildMolecule(data) {{
         if(!start||!end) return;
         const dir=new THREE.Vector3().subVectors(end,start),len=dir.length();
         const mid=new THREE.Vector3().addVectors(start,end).multiplyScalar(0.5);
-        const bondColor=new THREE.Color().lerpColors(new THREE.Color(sa.color),new THREE.Color(ea.color),0.5);
+        const bondColor=dimMode?new THREE.Color('#333'):new THREE.Color().lerpColors(new THREE.Color(sa.color),new THREE.Color(ea.color),0.5);
+        const bondOpacity=dimMode?0.3:0.75;
         const offsets=bond.order===1?[0]:bond.order===2?[-0.08,0.08]:[-0.12,0,0.12];
         offsets.forEach(offset=>{{
             const cyl=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,len,8),
-                new THREE.MeshStandardMaterial({{color:bondColor,emissive:bondColor,emissiveIntensity:0.4,metalness:0.5,roughness:0.3,transparent:true,opacity:0.75}}));
+                new THREE.MeshStandardMaterial({{color:bondColor,emissive:bondColor,emissiveIntensity:0.4,metalness:0.5,roughness:0.3,transparent:true,opacity:bondOpacity}}));
             cyl.position.copy(mid);
             if(offset!==0){{const perp=new THREE.Vector3().crossVectors(dir,new THREE.Vector3(0,1,0)).normalize();
             if(perp.length()<0.01)perp.crossVectors(dir,new THREE.Vector3(1,0,0)).normalize();
@@ -442,25 +587,112 @@ function updateInfoPanel(mol, isRef) {{
     document.getElementById('info-smiles').textContent=mol.smiles;
 }}
 
+function clearScene(){{
+    if(moleculeGroup){{scene.remove(moleculeGroup);moleculeGroup=null}}
+    if(refMolGroup){{scene.remove(refMolGroup);refMolGroup=null}}
+    if(particleSystem){{scene.remove(particleSystem);particleSystem=null}}
+    labelSprites=[];refLabelSprites=[];
+}}
+
+function createSideLabel(text, color, xPos, yPos){{
+    const canvas=document.createElement('canvas');canvas.width=512;canvas.height=64;
+    const ctx=canvas.getContext('2d');
+    ctx.font='bold 36px Outfit';ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.shadowColor=color;ctx.shadowBlur=12;
+    ctx.fillText(text,256,32);
+    const sprite=new THREE.Sprite(new THREE.SpriteMaterial({{map:new THREE.CanvasTexture(canvas),transparent:true,depthWrite:false}}));
+    sprite.position.set(xPos,yPos,0);sprite.scale.set(6,0.75,1);
+    return sprite;
+}}
+
+function renderCompareView(){{
+    clearScene();
+    if(currentIsRef||currentMolIndex<0) return;
+    const ci=currentMolIndex, ri=compareRefIndex;
+    const key=ci+'-'+ri;
+    const cmp=COMPARISONS[key]||{{cand_unique:[],ref_unique:[],common_count:0,cand_unique_count:0,ref_unique_count:0,summary:'N/A'}};
+    const cand=MOLECULES[ci];
+    // Show single candidate molecule: unique atoms in vivid colors, common atoms grey
+    const candResult=buildMolecule(cand.structure,cmp.cand_unique,'#4dff9e',true);
+    scene.add(candResult.group);moleculeGroup=candResult.group;labelSprites=candResult.sprites;
+    // Auto-enable labels
+    showLabels=true;document.getElementById('toggle-labels').classList.add('on');
+    labelSprites.forEach(s=>{{s.material.opacity=1}});
+    controls.autoRotate=autoRotate;
+    // Update compare panel
+    document.getElementById('cmp-common').textContent=cmp.common_count+' atoms';
+    document.getElementById('cmp-cand-unique').textContent=cmp.cand_unique_count+' atoms';
+    document.getElementById('cmp-ref-unique').textContent=cmp.ref_unique_count+' atoms';
+    document.getElementById('cmp-summary').textContent=cmp.summary;
+    camera.position.setLength(Math.max(candResult.cloudRadius*3,14));
+}}
+
+function renderNormalView(){{
+    clearScene();
+    const mol=currentIsRef?REFERENCES[currentMolIndex]:MOLECULES[currentMolIndex];
+    if(!mol) return;
+    const {{group,sprites,cloudRadius}}=buildMolecule(mol.structure);
+    scene.add(group);moleculeGroup=group;labelSprites=sprites;
+    particleSystem=createQuantumCloud(cloudRadius);particleSystem.visible=showParticles;scene.add(particleSystem);
+    camera.position.setLength(Math.max(cloudRadius*3,12));
+}}
+
 function selectMolecule(index, isRef) {{
     if(index===currentMolIndex && isRef===currentIsRef) return;
     document.querySelectorAll('.molecule-card').forEach(c=>c.classList.remove('active'));
     const cardId=isRef?'ref-card-'+index:'mol-card-'+index;
     const card=document.getElementById(cardId);if(card)card.classList.add('active');
-    if(moleculeGroup) scene.remove(moleculeGroup);
-    if(particleSystem) scene.remove(particleSystem);
     currentMolIndex=index;currentIsRef=isRef;
     const mol=isRef?REFERENCES[index]:MOLECULES[index];
-    const {{group,sprites,cloudRadius}}=buildMolecule(mol.structure);
-    scene.add(group);moleculeGroup=group;labelSprites=sprites;
-    particleSystem=createQuantumCloud(cloudRadius);particleSystem.visible=showParticles;scene.add(particleSystem);
     updateInfoPanel(mol,isRef);
-    camera.position.setLength(Math.max(cloudRadius*3,12));
+    if(compareMode&&!isRef){{renderCompareView()}}
+    else{{if(compareMode){{compareMode=false;document.getElementById('toggle-compare').classList.remove('on');document.getElementById('compare-panel').style.display='none';document.getElementById('info-panel').style.display='';document.getElementById('element-legend').style.display=''}}
+    renderNormalView();}}
 }}
 
 function toggleAutoRotate(){{autoRotate=!autoRotate;controls.autoRotate=autoRotate;document.getElementById('toggle-rotate').classList.toggle('on',autoRotate)}}
-function toggleLabels(){{showLabels=!showLabels;document.getElementById('toggle-labels').classList.toggle('on',showLabels);labelSprites.forEach(s=>{{s.material.opacity=showLabels?1:0}})}}
+function toggleLabels(){{showLabels=!showLabels;document.getElementById('toggle-labels').classList.toggle('on',showLabels);
+    labelSprites.forEach(s=>{{s.material.opacity=showLabels?1:0}});
+    refLabelSprites.forEach(s=>{{s.material.opacity=showLabels?1:0}});
+}}
 function toggleParticles(){{showParticles=!showParticles;document.getElementById('toggle-particles').classList.toggle('on',showParticles);if(particleSystem)particleSystem.visible=showParticles}}
+
+function toggleCompare(){{
+    if(currentIsRef) return;
+    compareMode=!compareMode;
+    document.getElementById('toggle-compare').classList.toggle('on',compareMode);
+    document.getElementById('compare-panel').style.display=compareMode?'block':'none';
+    document.getElementById('info-panel').style.display=compareMode?'none':'';
+    document.getElementById('element-legend').style.display=compareMode?'none':'';
+    // Show toggle buttons when in compare mode, hide sidebar for more space
+    document.getElementById('sidebar-toggle').style.display=compareMode?'flex':'none';
+    document.getElementById('compare-toggle-btn').style.display=compareMode?'flex':'none';
+    if(compareMode){{
+        document.getElementById('sidebar').classList.add('collapsed');
+        sidebarVisible=false;
+    }}else{{
+        document.getElementById('sidebar').classList.remove('collapsed');
+        document.getElementById('compare-panel').classList.remove('collapsed');
+        sidebarVisible=true;comparePanelVisible=true;
+        controls.autoRotate=autoRotate;
+    }}
+    if(compareMode){{renderCompareView()}}
+    else{{renderNormalView();updateInfoPanel(MOLECULES[currentMolIndex],false)}}
+}}
+let sidebarVisible=true, comparePanelVisible=true;
+function toggleSidebar(){{
+    sidebarVisible=!sidebarVisible;
+    document.getElementById('sidebar').classList.toggle('collapsed',!sidebarVisible);
+}}
+function toggleComparePanel(){{
+    comparePanelVisible=!comparePanelVisible;
+    document.getElementById('compare-panel').classList.toggle('collapsed',!comparePanelVisible);
+}}
+
+function onRefSelectorChange(){{
+    compareRefIndex=parseInt(document.getElementById('ref-selector').value)||0;
+    if(compareMode) renderCompareView();
+}}
 
 const clock=new THREE.Clock();
 function animate(){{
@@ -491,6 +723,9 @@ window.addEventListener('resize',()=>{{
     renderer.setSize(window.innerWidth,window.innerHeight);
 }});
 
+// Populate reference selector dropdown
+const refSel=document.getElementById('ref-selector');
+REFERENCES.forEach((r,i)=>{{const opt=document.createElement('option');opt.value=i;opt.textContent=r.name;refSel.appendChild(opt)}});
 populateUI();selectMolecule(0,false);animate();
 setTimeout(()=>{{document.getElementById('loading').classList.add('hide')}},800);
 </script>
@@ -546,8 +781,13 @@ if __name__ == "__main__":
 
     print(f"✓ Generated 3D data for {len(reference_data)} reference drugs")
 
+    # Compute MCS-based structural comparisons
+    print("\nComputing structural comparisons (MCS)...")
+    comparisons = compute_comparison_data(molecules_data, reference_data)
+    print(f"✓ Computed {len(comparisons)} comparison pairs")
+
     output_path = os.path.join(os.path.dirname(__file__), "molecule_viewer.html")
-    generate_html(molecules_data, output_path, reference_data=reference_data)
+    generate_html(molecules_data, output_path, reference_data=reference_data, comparisons=comparisons)
 
     print()
     print("=" * 60)
